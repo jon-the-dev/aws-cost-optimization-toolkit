@@ -1,0 +1,32 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ComputeOptimizerRightsizingReport",
+      "Effect": "Allow",
+      "Action": [
+        "compute-optimizer:GetEnrollmentStatus",
+        "compute-optimizer:GetEC2InstanceRecommendations",
+        "compute-optimizer:GetEBSVolumeRecommendations",
+        "compute-optimizer:GetLambdaFunctionRecommendations"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CostExplorerSavingsReport",
+      "Effect": "Allow",
+      "Action": [
+        "ce:GetSavingsPlansUtilization",
+        "ce:GetSavingsPlansCoverage",
+        "ce:GetSavingsPlansPurchaseRecommendation"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SchedulerDryRun",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeInstances",
+      "Resource": "*"
+    }
+  ]
+}

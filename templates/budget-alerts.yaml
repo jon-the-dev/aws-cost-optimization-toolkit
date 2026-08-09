@@ -1,0 +1,212 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Monthly AWS cost budget with threshold alerts plus a cost anomaly detector, both
+  notifying a single SNS topic. Daily DevOps aws-cost-optimization-toolkit.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Budget
+        Parameters:
+          - BudgetName
+          - MonthlyBudgetAmount
+          - AnomalyThresholdAmount
+      - Label:
+          default: Notifications
+        Parameters:
+          - NotificationEmail
+      - Label:
+          default: Tagging
+        Parameters:
+          - ApplicationTag
+          - EnvironmentTag
+          - OwnerTag
+          - CostCenterTag
+
+Parameters:
+  BudgetName:
+    Type: String
+    Default: monthly-account-budget
+    Description: Name of the budget as it appears in the AWS Billing console.
+    AllowedPattern: "^[A-Za-z0-9._-]{1,100}$"
+
+  MonthlyBudgetAmount:
+    Type: Number
+    Default: 1000
+    MinValue: 1
+    Description: Monthly cost budget in USD. Alerts fire at 50%, 80%, and 100% of this figure.
+
+  AnomalyThresholdAmount:
+    Type: Number
+    Default: 100
+    MinValue: 1
+    Description: Minimum USD impact before a detected cost anomaly raises a notification.
+
+  NotificationEmail:
+    Type: String
+    Description: >-
+      Email address subscribed to the alert topic. AWS sends a confirmation link that must
+      be clicked before any alert is delivered.
+    AllowedPattern: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+    ConstraintDescription: Must be a valid email address.
+
+  ApplicationTag:
+    Type: String
+    Default: aws-cost-optimization-toolkit
+    Description: Value for the Application tag on taggable resources.
+
+  EnvironmentTag:
+    Type: String
+    Default: prod
+    AllowedValues: [local, dev, staging, prod]
+    Description: Value for the Environment tag on taggable resources.
+
+  OwnerTag:
+    Type: String
+    Default: platform-team
+    Description: Value for the Owner tag on taggable resources.
+
+  CostCenterTag:
+    Type: String
+    Default: unassigned
+    Description: Value for the CostCenter tag on taggable resources.
+
+Resources:
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${BudgetName}-alerts"
+      DisplayName: AWS cost alerts
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationTag
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Owner
+          Value: !Ref OwnerTag
+        - Key: CostCenter
+          Value: !Ref CostCenterTag
+
+  AlertTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+      TopicArn: !Ref AlertTopic
+
+  # AWS Budgets and Cost Anomaly Detection publish from their own service principals,
+  # so the topic policy has to grant them sns:Publish explicitly.
+  AlertTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref AlertTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowBudgetsPublish
+            Effect: Allow
+            Principal:
+              Service: budgets.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlertTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+          - Sid: AllowCostAnomalyPublish
+            Effect: Allow
+            Principal:
+              Service: costalerts.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlertTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Ref BudgetName
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetAmount
+          Unit: USD
+        CostTypes:
+          IncludeCredit: false
+          IncludeRefund: false
+          IncludeSupport: true
+          IncludeTax: true
+          UseAmortized: true
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 50
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref AlertTopic
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref AlertTopic
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref AlertTopic
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref AlertTopic
+
+  CostAnomalyMonitor:
+    Type: AWS::CE::AnomalyMonitor
+    Properties:
+      MonitorName: !Sub "${BudgetName}-service-monitor"
+      MonitorType: DIMENSIONAL
+      MonitorDimension: SERVICE
+
+  CostAnomalySubscription:
+    Type: AWS::CE::AnomalySubscription
+    Properties:
+      SubscriptionName: !Sub "${BudgetName}-anomaly-alerts"
+      Frequency: DAILY
+      MonitorArnList:
+        - !Ref CostAnomalyMonitor
+      Subscribers:
+        - Type: SNS
+          Address: !Ref AlertTopic
+      ThresholdExpression: !Sub |
+        {
+          "Dimensions": {
+            "Key": "ANOMALY_TOTAL_IMPACT_ABSOLUTE",
+            "MatchOptions": ["GREATER_THAN_OR_EQUAL"],
+            "Values": ["${AnomalyThresholdAmount}"]
+          }
+        }
+
+Outputs:
+  AlertTopicArn:
+    Description: SNS topic that receives budget threshold and cost anomaly alerts.
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-AlertTopicArn"
+
+  BudgetName:
+    Description: Name of the created monthly cost budget.
+    Value: !Ref BudgetName
