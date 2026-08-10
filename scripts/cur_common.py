@@ -37,6 +37,12 @@ DEFAULT_TAG_ALIASES: dict[str, list[str]] = {
 }
 
 
+_ALIAS_FORMAT_ERROR = (
+    "error: {path} must be a JSON object mapping tag names to lists of column suffixes, "
+    'e.g. {{"CostCenter": ["costcenter", "cost_center"]}}'
+)
+
+
 def load_tag_aliases(path: str | Path | None) -> dict[str, list[str]]:
     """Load a canonical-tag alias map, falling back to the built-in defaults.
 
@@ -44,24 +50,44 @@ def load_tag_aliases(path: str | Path | None) -> dict[str, list[str]]:
         path: JSON file mapping canonical tag names to lists of CUR column
             suffixes, or None to use DEFAULT_TAG_ALIASES.
 
+    Keys beginning with an underscore are ignored, so the file can carry a
+    ``"_comment"`` note. JSON has no comment syntax and config files invariably
+    grow one.
+
     Returns:
         The alias mapping.
 
     Raises:
-        ValueError: If the file is not a JSON object of string lists.
+        SystemExit: If the file is missing, is not valid JSON, or is not an
+            object of string lists. These are all operator errors at startup, so
+            they exit with a message rather than a traceback.
     """
     if path is None:
         return dict(DEFAULT_TAG_ALIASES)
 
-    data = json.loads(Path(path).read_text())
-    if not isinstance(data, dict) or not all(
-        isinstance(v, list) and all(isinstance(a, str) for a in v) for v in data.values()
+    try:
+        raw = Path(path).read_text()
+    except OSError as exc:
+        raise SystemExit(f"error: cannot read --tag-aliases file {path}: {exc}") from None
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"error: {path} is not valid JSON: {exc}") from None
+
+    if not isinstance(data, dict):
+        raise SystemExit(_ALIAS_FORMAT_ERROR.format(path=path))
+
+    aliases = {k: v for k, v in data.items() if not str(k).startswith("_")}
+    if not all(
+        isinstance(v, list) and all(isinstance(a, str) for a in v) for v in aliases.values()
     ):
-        raise ValueError(
-            f"{path}: expected a JSON object mapping tag names to lists of strings, "
-            'e.g. {"CostCenter": ["costcenter", "cost_center"]}'
+        raise SystemExit(_ALIAS_FORMAT_ERROR.format(path=path))
+    if not aliases:
+        raise SystemExit(
+            f"error: {path} defines no tags. Remove --tag-aliases to use the defaults."
         )
-    return {str(k): list(v) for k, v in data.items()}
+    return {str(k): list(v) for k, v in aliases.items()}
 
 
 def resolve_tag_column(
