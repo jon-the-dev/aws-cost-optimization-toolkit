@@ -1,7 +1,8 @@
 # aws-cost-optimization-toolkit
 
-Runnable scripts and templates for the four AWS cost levers that pay off first: rightsizing,
-non-production schedules, budget alerting, and Savings Plans coverage.
+Runnable scripts and templates for the AWS cost levers that pay off first: rightsizing,
+non-production schedules, budget alerting, Savings Plans coverage, and Cost and Usage Report
+analysis.
 
 Companion repository for [Daily DevOps](https://www.daily-devops.com/).
 
@@ -13,6 +14,13 @@ nothing but Python and an AWS credential.
 
 ## What Is Included
 
+The repository has two tracks. The **live-API** scripts query AWS directly and need only a
+credential. The **CUR** scripts read a Cost and Usage Report export from local disk, which
+is the only way to get resource-level and tag-level detail that Cost Explorer aggregates
+away.
+
+### Live API
+
 | Artifact | What it does | Writes to AWS? |
 | --- | --- | --- |
 | [`scripts/rightsizing_report.py`](scripts/rightsizing_report.py) | Pulls Compute Optimizer EC2, EBS, and Lambda recommendations and ranks them by estimated monthly savings | No |
@@ -20,7 +28,22 @@ nothing but Python and an AWS credential.
 | [`scripts/instance_scheduler.py`](scripts/instance_scheduler.py) | Starts and stops tag-selected EC2 instances on an office-hours schedule | Only with `--apply` |
 | [`templates/budget-alerts.yaml`](templates/budget-alerts.yaml) | CloudFormation: monthly budget with 50/80/100% and forecast alerts, plus a cost anomaly monitor, both on one SNS topic | Yes, on deploy |
 
-Sample output for each script is committed under [`examples/output/`](examples/output/).
+### Cost and Usage Report
+
+| Artifact | What it does | Writes to AWS? |
+| --- | --- | --- |
+| [`scripts/tag_health_check.py`](scripts/tag_health_check.py) | Detects cost-allocation tag drift: two CUR columns feeding one canonical tag, tag columns that vanish between months, and non-canonical keys | No |
+| [`scripts/cur_untagged_drill.py`](scripts/cur_untagged_drill.py) | Splits untagged spend into resources you can actually tag and account-level charges you cannot | No |
+| [`scripts/cur_resource_diff.py`](scripts/cur_resource_diff.py) | Diffs billed resources between two months: new, disappeared, and materially moved | No |
+
+`tag_health_check.py` is the one to run first. A renamed tag key produces two CUR columns
+that map to the same canonical tag, spend silently splits across both, and every report
+downstream keeps rendering while quietly using only one of them. Nothing else in the
+toolkit will tell you that is happening.
+
+Sample output for the live-API scripts is committed under
+[`examples/output/`](examples/output/). The CUR scripts write self-contained HTML reports;
+their output is account-specific, so it is not committed.
 
 ## Prerequisites
 
@@ -30,11 +53,44 @@ Sample output for each script is committed under [`examples/output/`](examples/o
   `aws compute-optimizer update-enrollment-status --status Active`
 - Cost Explorer enabled, for the savings report. Note that Cost Explorer charges about
   **0.01 USD per API request**, so each run of that script costs a few cents.
+- A CUR export synced locally, for the three CUR scripts. See below.
 
 Minimum IAM for the read-only reports is in
 [`docs/iam-readonly-policy.json`](docs/iam-readonly-policy.json). The scheduler needs the
 tag-scoped policy in [`docs/iam-scheduler-policy.json`](docs/iam-scheduler-policy.json),
 which only permits start/stop on instances carrying the schedule tag.
+
+### Getting CUR Data
+
+Create a Cost and Usage Report in the Billing console with **Parquet** format and hourly
+granularity, pointed at an S3 bucket you own. AWS delivers the first file within about 24
+hours and refreshes it several times a day. The export itself is free; you pay only S3
+storage, which is cents a month for most accounts.
+
+Then sync it down:
+
+```bash
+export CUR_BUCKET=my-cur-bucket
+export CUR_PREFIX=cur
+aws s3 sync "s3://$CUR_BUCKET/$CUR_PREFIX/" cur-data/
+```
+
+The scripts read `cur-data/` by default; use `--cur-dir` to point elsewhere. They expect
+the Hive-style partitions AWS emits (`year=2026/month=7/`), because
+`tag_health_check.py` derives the reporting month from the file path.
+
+Cost-allocation tags only appear as CUR columns after you activate them under **Billing →
+Cost allocation tags**, and activation is not retroactive. The canonical tag names the
+scripts look for are defined in [`scripts/cur_common.py`](scripts/cur_common.py); override
+them with `--tag-aliases` pointing at a JSON file:
+
+```json
+{
+  "Company": ["company", "customer"],
+  "CostCenter": ["costcenter", "cost_center"],
+  "Team": ["team", "squad"]
+}
+```
 
 ## Quickstart
 
@@ -74,8 +130,26 @@ aws cloudformation deploy \
 Confirm the SNS subscription email afterwards. Until that link is clicked, the budget fires
 but nothing is delivered.
 
-Every script takes `--output table|markdown|csv|json`, so the reports drop straight into a
-ticket, a spreadsheet, or a downstream job.
+Every live-API script takes `--output table|markdown|csv|json`, so the reports drop straight
+into a ticket, a spreadsheet, or a downstream job.
+
+Then work the CUR, once an export is synced:
+
+```bash
+# Is cost attribution even trustworthy? Run this before believing any tag report.
+pipenv run python scripts/tag_health_check.py --output reports/tag-health.html
+
+# Of the untagged spend, how much can actually be fixed?
+pipenv run python scripts/cur_untagged_drill.py --tag Application --top 25
+
+# What showed up on the bill this month that was not there last month?
+pipenv run python scripts/cur_resource_diff.py --min-cost 1.00
+```
+
+The CUR scripts write a self-contained HTML report alongside their console summary, and
+take `--json` to dump raw findings for a downstream job. `tag_health_check.py` also takes
+`--strict`, which exits non-zero when it finds a collision or a disappeared column, so it
+can gate a reporting pipeline.
 
 ## Running The Scheduler On A Timer
 
@@ -110,6 +184,15 @@ script runs on a fixed interval and has to decide for itself.
 - **The budget template creates real resources.** AWS Budgets is free for the first two
   budgets per account and about 0.02 USD per budget per day after that. Cost anomaly
   detection is free. SNS email delivery is effectively free at alert volumes.
+- **CUR data is billing data.** A synced export contains every resource id and tag value in
+  the account. `cur-data/` and `reports/` are gitignored here; keep them that way, and treat
+  the generated HTML as confidential.
+- **The current month is always partial.** CUR data for an in-progress month is incomplete
+  and refreshes several times a day, so month-over-month comparisons against it will
+  understate. The untagged drill labels a partial month in its report.
+- **Untagged is not the same as fixable.** Most untagged spend is account-level — tax,
+  support, registrar fees, data transfer — with no resource to attach a tag to. The drill
+  separates the two so nobody is sent chasing the unfixable half.
 
 ## Validation
 
@@ -119,10 +202,12 @@ make test      # unit tests, every AWS call stubbed with botocore Stubber
 make samples   # regenerate examples/output/ from the synthetic fixtures
 ```
 
-The test suite makes no network calls. Every AWS response comes from
-[`tests/fixtures.py`](tests/fixtures.py), which uses invented resource IDs and the reserved
-example account `111122223333`. The committed sample output is generated from those same
-fixtures, and `make test` fails if it drifts out of sync.
+The test suite makes no network calls and reads no real billing data. Live-API responses
+come from [`tests/fixtures.py`](tests/fixtures.py), stubbed with botocore's `Stubber`, using
+invented resource IDs and the reserved example account `111122223333`. CUR tests build
+synthetic Parquet files in a temp directory from
+[`tests/cur_fixtures.py`](tests/cur_fixtures.py). The committed sample output is generated
+from the same live-API fixtures, and `make test` fails if it drifts out of sync.
 
 ## Related Daily DevOps Pages
 

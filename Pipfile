@@ -5,6 +5,8 @@ name = "pypi"
 
 [packages]
 boto3 = "*"
+pandas = "*"
+pyarrow = "*"
 
 [dev-packages]
 pytest = "*"

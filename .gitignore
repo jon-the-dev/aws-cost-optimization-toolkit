@@ -5,3 +5,7 @@ __pycache__/
 .ruff_cache/
 .DS_Store
 .env
+
+# CUR exports and generated reports contain real billing data — never commit them.
+cur-data/
+reports/
