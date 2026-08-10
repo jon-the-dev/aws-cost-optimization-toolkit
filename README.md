@@ -86,11 +86,16 @@ them with `--tag-aliases` pointing at a JSON file:
 
 ```json
 {
+  "_comment": "Keys starting with an underscore are ignored, so the file can carry a note.",
   "Company": ["company", "customer"],
   "CostCenter": ["costcenter", "cost_center"],
   "Team": ["team", "squad"]
 }
 ```
+
+Supplying `--tag-aliases` replaces the defaults rather than merging with them, so list
+every tag you want resolved. A tag missing from the map is silently unresolvable, which
+is the failure `tag_health_check.py` is there to catch.
 
 ## Quickstart
 

@@ -70,7 +70,37 @@ def test_load_tag_aliases_rejects_malformed_files(tmp_path, payload):
     path = tmp_path / "bad.json"
     path.write_text(payload)
 
-    with pytest.raises(ValueError, match="expected a JSON object"):
+    with pytest.raises(SystemExit, match="must be a JSON object"):
+        load_tag_aliases(path)
+
+
+def test_load_tag_aliases_reports_bad_json_without_a_traceback(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text("{not json")
+
+    with pytest.raises(SystemExit, match="not valid JSON"):
+        load_tag_aliases(path)
+
+
+def test_load_tag_aliases_reports_a_missing_file(tmp_path):
+    with pytest.raises(SystemExit, match="cannot read"):
+        load_tag_aliases(tmp_path / "absent.json")
+
+
+def test_load_tag_aliases_ignores_underscore_prefixed_comment_keys(tmp_path):
+    # JSON has no comments, so config files grow a "_comment" key. Failing on it
+    # is a papercut the first consumer of this toolkit hit immediately.
+    path = tmp_path / "aliases.json"
+    path.write_text(json.dumps({"_comment": "why these tags", "Team": ["team"]}))
+
+    assert load_tag_aliases(path) == {"Team": ["team"]}
+
+
+def test_load_tag_aliases_rejects_a_file_that_is_only_comments(tmp_path):
+    path = tmp_path / "aliases.json"
+    path.write_text(json.dumps({"_comment": "oops, no tags"}))
+
+    with pytest.raises(SystemExit, match="defines no tags"):
         load_tag_aliases(path)
 
 
